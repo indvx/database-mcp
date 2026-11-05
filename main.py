@@ -14,11 +14,7 @@ from mcp_module.server import mcp, app as mcp_app
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # Coordinate FastMCP session manager lifecycle with FastAPI
-    if hasattr(mcp, "session_manager") and hasattr(mcp.session_manager, "run"):
-        async with contextlib.AsyncExitStack() as stack:
-            await stack.enter_async_context(mcp.session_manager.run())
-            yield
-    else:
+    async with mcp.session_manager.run():
         yield
 
 
@@ -47,8 +43,8 @@ def health_check():
     }
 
 
-# Mount the streamable HTTP FastMCP app under /mcp
-app.mount("/mcp", mcp_app)
+# Mount FastMCP streamable app at root so its internal /mcp route maps directly to /mcp
+app.mount("", mcp_app)
 
 
 if __name__ == "__main__":
