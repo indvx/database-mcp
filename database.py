@@ -16,12 +16,14 @@ SQLALCHEMY_DATABASE_URL = "{}://{}:{}@{}:{}/{}".format(
 )
 connect_args = {}
 ssl_context=None
+ca_cert_content = settings.db_ssl_key if settings.db_ssl_key else None
 if settings.db_ssl_mode == 'enable':
-    ca_cert_content = getattr(settings, "db_ssl_key", None)
     if ca_cert_content:
         with open("ca.pem", "w") as f:
             f.write(ca_cert_content)
-    
+    else:
+        raise ValueError("AIVEN_CA_CERT environment variable is missing or empty!")
+
     ssl_context = ssl.create_default_context(cafile="ca.pem")
     ssl_context.check_hostname = True
     ssl_context.verify_mode = ssl.CERT_REQUIRED
