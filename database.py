@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 # Build the database connection string from environment variables
 SQLALCHEMY_DATABASE_URL = "{}://{}:{}@{}:{}/{}".format(
-    settings.db_connection,
-    settings.db_user,
-    settings.db_password,
-    settings.db_host,
-    settings.db_port,
-    settings.db_database,
+    settings.db_connection.strip(),
+    settings.db_user.strip(),
+    settings.db_password.strip(),
+    settings.db_host.strip(),      # <--- This fixes the [Errno -2] DNS error!
+    str(settings.db_port).strip(),
+    settings.db_database.strip(),
 )
 
 ssl_context = None
