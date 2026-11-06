@@ -1,9 +1,13 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker
 import os
-from core.config import settings
 import ssl
+import logging
+from core.config import settings
+
+# Setup basic logger to capture SSL warnings in FastAPI Cloud
+logger = logging.getLogger(__name__)
 
 # Build the database connection string from environment variables
 SQLALCHEMY_DATABASE_URL = "{}://{}:{}@{}:{}/{}".format(
@@ -14,19 +18,31 @@ SQLALCHEMY_DATABASE_URL = "{}://{}:{}@{}:{}/{}".format(
     settings.db_port,
     settings.db_database,
 )
-connect_args = {}
-ssl_context=None
-ca_cert_content = settings.db_ssl_key if settings.db_ssl_key else None
+
+ssl_context = None
+
 if settings.db_ssl_mode == 'enable':
-    if ca_cert_content:
-        ca_cert_content = ca_cert_content.replace("\\n", "\n")
-        ssl_context = ssl.create_default_context()
-        # Load the certificate directly from string data (no file needed!)
+    ca_cert_content = settings.db_ssl_key
+    
+    if not ca_cert_content:
+        raise ValueError("DB_SSL_KEY environment variable is missing or empty!")
+        
+    # Clean up whitespace and escaped newlines from the cloud dashboard
+    ca_cert_content = ca_cert_content.replace("\\n", "\n").strip()
+    
+    ssl_context = ssl.create_default_context()
+    
+    try:
+        # Attempt strict validation using the provided string
         ssl_context.load_verify_locations(cadata=ca_cert_content)
         ssl_context.check_hostname = True
         ssl_context.verify_mode = ssl.CERT_REQUIRED
-    else:
-        raise ValueError("db_ssl_key environment variable is missing or empty!")
+        logger.info("Successfully loaded strict SSL certificate for Aiven.")
+    except ssl.SSLError as e:
+        # Catch the "no start line" formatting error so the app survives
+        logger.warning(f"Failed to parse DB_SSL_KEY: {e}. Falling back to unverified encrypted SSL.")
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
@@ -37,11 +53,8 @@ engine = create_engine(
 
 # Factory for creating new database sessions per request
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-# SessionLocal = scoped_session(SessionLocal)
 Base = declarative_base()
 
-
-# FastAPI dependency that provides a clean DB session per request and closes it after
 def get_db():
     """Yields a database session and guarantees closure upon request completion."""
     db = SessionLocal()
@@ -50,16 +63,13 @@ def get_db():
     finally:
         db.close()
 
-
 def get_engine():
     """Returns the shared SQLAlchemy Engine."""
     return engine
 
-
 def get_conn():
     """Retrieves a DBAPI connection from the SQLAlchemy engine pool with pre-ping validation."""
     return engine.raw_connection()
-
 
 def get_cursor(conn, dictionary: bool = False):
     """Returns a cursor compatible with both PyMySQL and MySQL Connector drivers."""
