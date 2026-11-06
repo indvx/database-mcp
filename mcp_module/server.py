@@ -750,4 +750,176 @@ def count_records_table(
         return error_response(f"Error counting records: {e}")
 
 
+@mcp.tool(
+    description=(
+        "Search records in a database table by keyword, person's name, or search phrase. "
+        "ALWAYS use this tool when looking up an individual person, employee, user, or entity by name (e.g. 'Gourav Panchal', 'Panchal', 'Gourav', 'Admin'). "
+        "This is a strictly READ-ONLY search operation that executes a SELECT query. It cannot modify or delete data. "
+        "Intelligently searches full names (handling first and last names together), phonetic variations (Soundex for alternate spellings like Gaurav/Gourav), emails, and text fields. "
+        "Returns the most relevant matching records directly in a single call."
+    )
+)
+def search_records(
+    table: str,
+    search_term: Optional[str] = None,
+    query: Optional[str] = None,
+    fields: Optional[Union[list[str], str]] = None,
+    limit: int = 10,
+):
+    """Search records in a table by keyword or entity name. Read-only SELECT operation."""
+    try:
+        actual_table = get_actual_table_name(table)
+        if not actual_table:
+            return error_response(f"Table '{table}' does not exist.")
+
+        raw_query = search_term if search_term is not None else query
+        clean_query = (raw_query or "").strip()
+        if not clean_query:
+            return error_response("Search term cannot be empty.")
+
+        available_fields = get_table_fields_raw(actual_table)
+        if not available_fields:
+            return error_response(f"No fields found for table '{actual_table}'.")
+
+        available_field_names = [f["column_name"] for f in available_fields]
+        available_field_names_lower = {f["column_name"].lower(): f["column_name"] for f in available_fields}
+
+        # Resolve selected fields
+        if fields:
+            if isinstance(fields, str):
+                fields = [f.strip() for f in fields.split(",") if f.strip()]
+            selected_fields = []
+            for rf in fields:
+                act = find_field(available_fields, rf)
+                if act and act.lower() not in SENSITIVE_FIELDS:
+                    selected_fields.append(act)
+            if not selected_fields:
+                selected_fields = [
+                    f["column_name"] for f in available_fields
+                    if f["column_name"].lower() not in SENSITIVE_FIELDS
+                    and f["column_name"].lower() not in HEAVY_FIELDS
+                    and f["data_type"].lower() not in HEAVY_DATA_TYPES
+                ]
+        else:
+            selected_fields = [
+                f["column_name"] for f in available_fields
+                if f["column_name"].lower() not in SENSITIVE_FIELDS
+                and f["column_name"].lower() not in HEAVY_FIELDS
+                and f["data_type"].lower() not in HEAVY_DATA_TYPES
+                and not f["column_name"].lower().endswith(("_file", "_blob", "_image", "_token"))
+            ]
+            if not selected_fields:
+                selected_fields = [
+                    f["column_name"] for f in available_fields
+                    if f["column_name"].lower() not in SENSITIVE_FIELDS
+                ]
+
+        tokens = [t.strip() for t in clean_query.split() if t.strip()]
+
+        has_first_name = "first_name" in available_field_names_lower
+        has_last_name = "last_name" in available_field_names_lower
+
+        first_name_col = available_field_names_lower.get("first_name")
+        last_name_col = available_field_names_lower.get("last_name")
+
+        # Discover string/text columns to search
+        text_types = {"varchar", "char", "text", "tinytext", "mediumtext"}
+        searchable_cols = [
+            f["column_name"] for f in available_fields
+            if f["data_type"].lower() in text_types
+            and f["column_name"].lower() not in SENSITIVE_FIELDS
+            and f["column_name"].lower() not in HEAVY_FIELDS
+            and not f["column_name"].lower().endswith(("_file", "_blob", "_image", "_token"))
+        ]
+
+        where_clauses = []
+        where_params = []
+        rank_cases = []
+        rank_params = []
+
+        # Name search logic with phonetic/soundex tolerance
+        if has_first_name and has_last_name:
+            fn = f"`{first_name_col}`"
+            ln = f"`{last_name_col}`"
+
+            if len(tokens) >= 2:
+                t1, t2 = tokens[0], tokens[1]
+                name_clause = (
+                    f"(CONCAT(COALESCE({fn}, ''), ' ', COALESCE({ln}, '')) LIKE %s "
+                    f"OR (({fn} LIKE %s OR SOUNDEX({fn}) = SOUNDEX(%s)) AND ({ln} LIKE %s OR SOUNDEX({ln}) = SOUNDEX(%s))) "
+                    f"OR (({ln} LIKE %s OR SOUNDEX({ln}) = SOUNDEX(%s)) AND ({fn} LIKE %s OR SOUNDEX({fn}) = SOUNDEX(%s))))"
+                )
+                where_clauses.append(name_clause)
+                where_params.extend([
+                    f"%{clean_query}%",
+                    f"%{t1}%", t1, f"%{t2}%", t2,
+                    f"%{t1}%", t1, f"%{t2}%", t2,
+                ])
+
+                rank_cases.append(f"WHEN CONCAT(COALESCE({fn}, ''), ' ', COALESCE({ln}, '')) LIKE %s THEN 1")
+                rank_params.append(f"%{clean_query}%")
+                rank_cases.append(
+                    f"WHEN (({fn} LIKE %s OR SOUNDEX({fn}) = SOUNDEX(%s)) AND ({ln} LIKE %s OR SOUNDEX({ln}) = SOUNDEX(%s))) THEN 2"
+                )
+                rank_params.extend([f"%{t1}%", t1, f"%{t2}%", t2])
+
+            else:
+                t = tokens[0]
+                name_clause = (
+                    f"({fn} LIKE %s OR SOUNDEX({fn}) = SOUNDEX(%s) OR {ln} LIKE %s OR SOUNDEX({ln}) = SOUNDEX(%s))"
+                )
+                where_clauses.append(name_clause)
+                where_params.extend([f"%{t}%", t, f"%{t}%", t])
+
+                rank_cases.append(f"WHEN {fn} = %s OR {ln} = %s THEN 1")
+                rank_params.extend([t, t])
+                rank_cases.append(f"WHEN {fn} LIKE %s OR {ln} LIKE %s THEN 2")
+                rank_params.extend([f"%{t}%", f"%{t}%"])
+                rank_cases.append(f"WHEN SOUNDEX({fn}) = SOUNDEX(%s) OR SOUNDEX({ln}) = SOUNDEX(%s) THEN 3")
+                rank_params.extend([t, t])
+
+        # Also search across other candidate text columns (e.g. email, code, username, title, name)
+        other_cols = [c for c in searchable_cols if c.lower() not in ("first_name", "last_name")]
+        for col in other_cols[:6]:
+            where_clauses.append(f"`{col}` LIKE %s")
+            where_params.append(f"%{clean_query}%")
+
+        if not where_clauses:
+            return error_response(f"No searchable text columns found in table '{actual_table}'.")
+
+        limit = min(max(limit or 1, 1), MAX_RECORD_LIMIT)
+        columns_sql = ", ".join(f"`{c}`" for c in selected_fields)
+        where_sql = " OR ".join(where_clauses)
+
+        order_by_sql = ""
+        final_params = list(where_params)
+        if rank_cases:
+            order_by_sql = f"ORDER BY (CASE {' '.join(rank_cases)} ELSE 99 END) ASC"
+            final_params.extend(rank_params)
+
+        final_params.append(limit)
+
+        query_sql = f"SELECT {columns_sql} FROM `{actual_table}` WHERE {where_sql} {order_by_sql} LIMIT %s"
+
+        conn = get_conn()
+        cur = get_cursor(conn, dictionary=True)
+        try:
+            cur.execute(query_sql, tuple(final_params))
+            rows = cur.fetchall()
+            serialized_rows = [serialize_row(row) for row in rows]
+            return success_response({
+                "table": actual_table,
+                "query": clean_query,
+                "count": len(serialized_rows),
+                "data": serialized_rows,
+            })
+        finally:
+            cur.close()
+            conn.close()
+
+    except Exception as e:
+        print(f"Error searching records: {e}", file=sys.stderr)
+        return error_response(f"Error searching records: {e}")
+
+
 app = mcp.streamable_http_app()
