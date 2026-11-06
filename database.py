@@ -29,6 +29,7 @@ if settings.db_ssl_mode == 'enable':
         
     # Clean up whitespace and escaped newlines from the cloud dashboard
     ca_cert_content = ca_cert_content.replace("\\n", "\n").strip()
+    
     ssl_context = ssl.create_default_context()
     
     try:
