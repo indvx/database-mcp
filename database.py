@@ -30,13 +30,10 @@ if settings.db_ssl_mode == 'enable':
 
 # pool_pre_ping automatically reconnects if MySQL drops stale connections
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    pool_size=settings.db_pool_size if hasattr(settings, "db_pool_size") else 5,
-    pool_pre_ping=True,
-    isolation_level="READ COMMITTED",
-    connect_args={
-        "ssl": ssl_context
-    } if ssl_context else {}
+    DATABASE_URL,
+    connect_args={"ssl": ssl_context} if ssl_context else {},
+    pool_pre_ping=True,  # Automatically tests connection health before executing queries
+    pool_recycle=3600    # Recycles connections every hour to prevent drops
 )
 
 # Factory for creating new database sessions per request
