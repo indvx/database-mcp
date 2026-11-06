@@ -19,21 +19,20 @@ ssl_context=None
 ca_cert_content = settings.db_ssl_key if settings.db_ssl_key else None
 if settings.db_ssl_mode == 'enable':
     if ca_cert_content:
-        with open("ca.pem", "w") as f:
-            f.write(ca_cert_content)
+        ca_cert_content = ca_cert_content.replace("\\n", "\n")
+        ssl_context = ssl.create_default_context()
+        # Load the certificate directly from string data (no file needed!)
+        ssl_context.load_verify_locations(cadata=ca_cert_content)
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
     else:
-        raise ValueError("AIVEN_CA_CERT environment variable is missing or empty!")
+        raise ValueError("db_ssl_key environment variable is missing or empty!")
 
-    ssl_context = ssl.create_default_context(cafile="ca.pem")
-    ssl_context.check_hostname = True
-    ssl_context.verify_mode = ssl.CERT_REQUIRED
-
-# pool_pre_ping automatically reconnects if MySQL drops stale connections
 engine = create_engine(
-    DATABASE_URL,
+    SQLALCHEMY_DATABASE_URL,
     connect_args={"ssl": ssl_context} if ssl_context else {},
-    pool_pre_ping=True,  # Automatically tests connection health before executing queries
-    pool_recycle=3600    # Recycles connections every hour to prevent drops
+    pool_pre_ping=True,
+    pool_recycle=3600
 )
 
 # Factory for creating new database sessions per request
