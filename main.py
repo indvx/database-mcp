@@ -25,6 +25,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.mount("", mcp_app)
+
 
 @app.get("/health")
 def health_check():
@@ -41,12 +43,3 @@ def health_check():
         "status": "healthy",
         "database_connected": db_connected,
     }
-
-
-# Mount FastMCP streamable app at root so its internal /mcp route maps directly to /mcp
-app.mount("", mcp_app)
-
-
-if __name__ == "__main__":
-    from core.config import settings
-    uvicorn.run("main:app", host=settings.mcp_host, port=settings.mcp_port, reload=True)
